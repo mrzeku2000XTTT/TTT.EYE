@@ -1,4 +1,3 @@
-
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality, Type } from '@google/genai';
 import { SessionStatus, TranscriptionEntry } from './types';
@@ -23,6 +22,9 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [searchSources, setSearchSources] = useState<SearchSource[]>([]);
   const [hasSystemAudio, setHasSystemAudio] = useState(false);
+  
+  // Continuous Analysis Mode State
+  const [liveAnalysisMode, setLiveAnalysisMode] = useState(false);
 
   // Music / Shazam State
   const [musicState, setMusicState] = useState<{ artist: string; title: string; isVisible: boolean }>({ 
@@ -64,6 +66,31 @@ const App: React.FC = () => {
 
   const currentInRef = useRef('');
   const currentOutRef = useRef('');
+
+  useEffect(() => {
+    console.log("Radiant Tactical Core: Initialized");
+  }, []);
+
+  // --- LIVE ANALYSIS LOOP ---
+  // If Live Mode is active and the model stops speaking, we nudge it to keep describing the screen.
+  useEffect(() => {
+    let nudgeInterval: number;
+    
+    if (liveAnalysisMode && status === SessionStatus.CONNECTED) {
+       nudgeInterval = window.setInterval(() => {
+          // Only send a nudge if the model isn't currently talking
+          if (!isModelSpeaking && activeSessionRef.current) {
+             // We send a text message (hidden from UI usually) to force the model to look at the latest frame and speak
+             activeSessionRef.current.sendRealtimeInput({
+                content: [{ text: "Analyze current frame for movement or changes." }] 
+             });
+          }
+       }, 2500); // Check every 2.5 seconds
+    }
+
+    return () => clearInterval(nudgeInterval);
+  }, [liveAnalysisMode, status, isModelSpeaking]);
+
 
   // Handle incoming screen stream audio
   const connectScreenAudio = (stream: MediaStream) => {
@@ -130,11 +157,18 @@ const App: React.FC = () => {
     setIsSharingScreen(false);
     setIsModelSpeaking(false);
     setHasSystemAudio(false);
+    setLiveAnalysisMode(false);
     setMusicState(prev => ({ ...prev, isVisible: false }));
   }, []);
 
   const handleAgentAction = useCallback(async (name: string, args: any) => {
     switch (name) {
+      case 'set_continuous_analysis':
+         const isActive = args.active;
+         setLiveAnalysisMode(isActive);
+         setTerminalOutput(prev => [...prev.slice(-8), isActive ? `[MODE] LIVE ANALYSIS: ENGAGED` : `[MODE] LIVE ANALYSIS: STANDBY`]);
+         return isActive ? "Live mode detected. Starting continuous stream." : "Live mode disabled.";
+
       case 'update_tactical_hud':
          const prevData = tacticalDataRef.current;
          setTacticalData(prev => ({
@@ -237,6 +271,17 @@ const App: React.FC = () => {
             },
             required: ['artist', 'title']
           }
+        },
+        {
+          name: 'set_continuous_analysis',
+          parameters: {
+            type: Type.OBJECT,
+            description: 'Call this to enable or disable continuous real-time reporting mode. Use true to start, false to stop.',
+            properties: {
+              active: { type: Type.BOOLEAN }
+            },
+            required: ['active']
+          }
         }
       ];
 
@@ -295,7 +340,11 @@ const App: React.FC = () => {
       1. **LISTEN INTENTLY**: You are receiving a MIX of user voice and SYSTEM AUDIO (game sounds).
       2. **"LISTEN" COMMAND**: If the user says "Listen" or "Shh" or "Quiet", you must **STOP TALKING IMMEDIATELY** and remain silent.
       3. **SOUND RECOGNITION**: Spike Plant/Defuse, Footsteps.
-      4. **MUSIC ID**: If the user asks "What song is this?", identify it from the audio stream and call 'identify_song'.
+      
+      LIVE ANALYSIS MODE:
+      - **TRIGGER**: If user says "Live real time analysis", call tool 'set_continuous_analysis(true)'.
+      - **RESPONSE**: Say "Live mode detected" and immediately begin describing visual changes.
+      - **BEHAVIOR**: In this mode, do NOT wait for user input. Continuously describe movement, enemy positions, or HUD changes as you see them. Be fast. Be punchy. "Enemy on left", "Jett dashing", "Smoke deployed".
       
       VISUAL & STRATEGIC DIRECTIVES:
       - VISUAL GROUNDING: Verify score, economy, and agents.
@@ -308,13 +357,13 @@ const App: React.FC = () => {
       
       CAPABILITIES:
       1. **VISUAL**: You can see the user's screen in real-time.
-      2. **AUDIO**: You can hear the user and their system audio (videos, music, notifications).
+      2. **AUDIO**: You can hear the user and their system audio.
       
-      GOALS:
-      - Assist with whatever is on screen: coding debugging, writing, browsing, or gaming.
-      - Be conversational and concise.
-      - **MUSIC IDENTIFICATION**: If you hear music and the user asks "What song is this?", identify the song from the audio and use the 'identify_song' tool.
-      
+      LIVE ANALYSIS MODE:
+      - **TRIGGER**: If user says "Live real time analysis", call tool 'set_continuous_analysis(true)'.
+      - **RESPONSE**: Say "Live mode detected" and immediately begin describing screen activity.
+      - **BEHAVIOR**: Continuously narrate actions (e.g., "Opening browser", "Typing code", "Watching video"). Do not stop until interrupted.
+
       AUDIO COMMAND: If the user says "Quiet" or "Listen", stop talking immediately.`;
 
       const sessionPromise = ai.live.connect({
@@ -342,6 +391,12 @@ const App: React.FC = () => {
               audioSourcesRef.current.clear();
               nextStartTimeRef.current = 0;
               setIsModelSpeaking(false);
+              
+              // CRITICAL: If interrupted by user voice, STOP the live analysis loop
+              if (liveAnalysisMode) {
+                setLiveAnalysisMode(false);
+                setTerminalOutput(prev => [...prev.slice(-8), "[MODE] LIVE ANALYSIS: ABORTED"]);
+              }
               
               if (systemGainRef.current && audioContextRef.current) {
                  const ctx = audioContextRef.current.input;
@@ -536,6 +591,16 @@ const App: React.FC = () => {
             
             {isSharingScreen && (
               <>
+                 {/* LIVE ANALYSIS INDICATOR */}
+                 {liveAnalysisMode && (
+                   <div className="absolute top-8 left-1/2 -translate-x-1/2 z-40 flex flex-col items-center gap-1 animate-in slide-in-from-top duration-500">
+                      <div className="px-4 py-1 bg-red-600/90 text-white text-[10px] font-black uppercase tracking-[0.3em] border border-red-400 shadow-[0_0_20px_rgba(220,38,38,0.5)] animate-pulse rounded-sm">
+                         Live Analysis
+                      </div>
+                      <div className="w-full h-0.5 bg-red-500 animate-scanner-line"></div>
+                   </div>
+                 )}
+
                  {/* Music / Shazam Overlay */}
                  {musicState.isVisible && (
                     <div className="absolute top-8 left-8 z-30 animate-in slide-in-from-left duration-700">
