@@ -1,6 +1,6 @@
 {
-  "name": "EYERA AI",
-  "description": "A powerful AI agent that can 'see' your PC screen in real-time using Gemini Live API. It combines screen capture and voice interaction for a truly multimodal assistant experience.",
+  "name": "AYRA AI",
+  "description": "AYRA powerful AI agent that can 'see' your PC screen in real-time using Gemini Live API. It combines screen capture and voice interaction for a truly multimodal assistant experience.",
   "requestFramePermissions": [
     "camera",
     "microphone",

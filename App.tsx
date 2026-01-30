@@ -10,6 +10,14 @@ interface SearchSource {
   uri: string;
 }
 
+interface SubAgent {
+  id: string;
+  name: string;
+  focus: string;
+  webhookUrl: string;
+  trainingSamples: number;
+}
+
 type AppMode = 'TACTICAL' | 'GENERAL';
 
 const App: React.FC = () => {
@@ -18,7 +26,7 @@ const App: React.FC = () => {
   const [isSharingScreen, setIsSharingScreen] = useState(false);
   const [isMicEnabled, setIsMicEnabled] = useState(false);
   const [isModelSpeaking, setIsModelSpeaking] = useState(false);
-  const [micVolume, setMicVolume] = useState(0); // For visual feedback
+  const [micVolume, setMicVolume] = useState(0); 
   const [transcriptions, setTranscriptions] = useState<TranscriptionEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [searchSources, setSearchSources] = useState<SearchSource[]>([]);
@@ -26,6 +34,11 @@ const App: React.FC = () => {
   
   // Continuous Analysis Mode State
   const [liveAnalysisMode, setLiveAnalysisMode] = useState(false);
+
+  // Agent Training State
+  const [showAgentModal, setShowAgentModal] = useState(false);
+  const [subAgents, setSubAgents] = useState<SubAgent[]>([]);
+  const [activeAgentId, setActiveAgentId] = useState<string | null>(null);
 
   // Music / Shazam State
   const [musicState, setMusicState] = useState<{ artist: string; title: string; isVisible: boolean }>({ 
@@ -36,7 +49,7 @@ const App: React.FC = () => {
 
   // Tactical & Learning UI States
   const [cursorPos, setCursorPos] = useState({ x: 50, y: 50 });
-  const [terminalOutput, setTerminalOutput] = useState<string[]>(["[System] Radiant Core v9.6", "[Audio] Loopback Defense: MAX"]);
+  const [terminalOutput, setTerminalOutput] = useState<string[]>(["[System] Radiant Core v9.7", "[Neural] Webhook Interface: READY"]);
   const [learningScore, setLearningScore] = useState(15); 
   const [tacticalPatterns, setTacticalPatterns] = useState<string[]>([]); // Persistent Memory
   const [tacticalData, setTacticalData] = useState({ 
@@ -72,18 +85,20 @@ const App: React.FC = () => {
     console.log("Radiant Tactical Core: Initialized");
   }, []);
 
-  // --- LIVE ANALYSIS LOOP ---
+  // --- LIVE ANALYSIS LOOP (CONTINUOUS AUDIO) ---
   useEffect(() => {
     let nudgeInterval: number;
     
     if (liveAnalysisMode && status === SessionStatus.CONNECTED) {
+       // Check very frequently (100ms) if the model has stopped speaking to minimize gaps
        nudgeInterval = window.setInterval(() => {
           if (!isModelSpeaking && activeSessionRef.current) {
+             console.log("Nudging model for continuous audio...");
              activeSessionRef.current.sendRealtimeInput({
-                content: [{ text: "Analyze current frame for movement or changes." }] 
+                content: [{ text: "CONTINUE_NARRATION_IMMEDIATELY: Describe visual changes, HUD state, or potential strategy. Do not stop speaking." }] 
              });
           }
-       }, 2500); 
+       }, 100); 
     }
 
     return () => clearInterval(nudgeInterval);
@@ -157,8 +172,60 @@ const App: React.FC = () => {
     setMicVolume(0);
   }, []);
 
+  // --- REWARD / TRAINING LOGIC ---
+  const handleReward = () => {
+    if (status !== SessionStatus.CONNECTED) return;
+
+    // 1. Visual Feedback
+    setLearningScore(prev => Math.min(prev + 10, 100));
+    
+    // 2. Identify active agent
+    const currentAgent = subAgents.find(a => a.id === activeAgentId);
+    const agentName = currentAgent ? currentAgent.name : "CORE_MODEL";
+    
+    // 3. Log to Terminal
+    setTerminalOutput(prev => [...prev.slice(-8), `[TRAINING] REWARD SIGNAL >>> ${agentName}`]);
+    
+    // 4. Update Agent Stats
+    if (currentAgent) {
+        setSubAgents(prev => prev.map(a => a.id === activeAgentId ? { ...a, trainingSamples: a.trainingSamples + 1 } : a));
+        // Simulate Webhook Push
+        console.log(`Sending training tensor to ${currentAgent.webhookUrl}`, {
+            transcription: transcriptions.slice(-2),
+            tacticalData: tacticalDataRef.current
+        });
+    }
+
+    // 5. Notify AI
+    if (activeSessionRef.current) {
+        activeSessionRef.current.sendRealtimeInput({
+            content: [{ text: `[SYSTEM] POSITIVE REINFORCEMENT RECEIVED. Current behavior tagged as valid training data for agent: ${agentName}.` }]
+        });
+    }
+  };
+
+  const createAgent = (name: string, focus: string) => {
+    const newId = Math.random().toString(36).substr(2, 9);
+    const webhook = `https://api.radiant-core.ai/v1/hooks/${newId}`;
+    const newAgent: SubAgent = {
+        id: newId,
+        name,
+        focus,
+        webhookUrl: webhook,
+        trainingSamples: 0
+    };
+    setSubAgents(prev => [...prev, newAgent]);
+    setActiveAgentId(newId);
+    setTerminalOutput(prev => [...prev.slice(-8), `[FORGE] CREATED AGENT: ${name}`]);
+    return webhook;
+  };
+
   const handleAgentAction = useCallback(async (name: string, args: any) => {
     switch (name) {
+      case 'create_learning_agent':
+         const webhook = createAgent(args.name, args.focus || 'General');
+         return `Agent ${args.name} created. Training Webhook: ${webhook}`;
+
       case 'set_continuous_analysis':
          const isActive = args.active;
          setLiveAnalysisMode(isActive);
@@ -223,8 +290,6 @@ const App: React.FC = () => {
 
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       
-      // Initialize Audio Contexts
-      // We try to request 16000 sample rate, but the browser might ignore it.
       const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       audioContextRef.current = { input: inputCtx, output: outputCtx };
@@ -232,8 +297,6 @@ const App: React.FC = () => {
       if (inputCtx.state === 'suspended') await inputCtx.resume();
       if (outputCtx.state === 'suspended') await outputCtx.resume();
       
-      console.log(`Audio Input Rate: ${inputCtx.sampleRate}Hz`); // Debug log
-
       const mixer = inputCtx.createGain();
       mixerRef.current = mixer;
 
@@ -247,7 +310,7 @@ const App: React.FC = () => {
             echoCancellation: true,
             noiseSuppression: true,
             autoGainControl: true,
-            sampleRate: 16000 // Hint to browser
+            sampleRate: 16000
         } 
       });
       setIsMicEnabled(true);
@@ -260,6 +323,18 @@ const App: React.FC = () => {
 
       // --- CONFIGURATION ---
       const commonTools = [
+        {
+            name: 'create_learning_agent',
+            parameters: {
+                type: Type.OBJECT,
+                description: 'Initialize a new sub-agent for specialized training based on current session data.',
+                properties: {
+                    name: { type: Type.STRING },
+                    focus: { type: Type.STRING, description: 'The specific task this agent is learning (e.g., "Aim Coach", "Code Reviewer")' }
+                },
+                required: ['name']
+            }
+        },
         {
           name: 'identify_song',
           parameters: {
@@ -341,28 +416,29 @@ const App: React.FC = () => {
       2. **"LISTEN" COMMAND**: If the user says "Listen" or "Shh" or "Quiet", you must **STOP TALKING IMMEDIATELY** and remain silent.
       3. **SOUND RECOGNITION**: Spike Plant/Defuse, Footsteps.
       
+      TRAINING & SUB-AGENTS:
+      - The user can create "Sub-Agents" to learn specific tasks.
+      - If the user rewards you, acknowledge it as "Training Data Logged".
+      - You can create agents via tool 'create_learning_agent' if the user asks.
+
       LIVE ANALYSIS MODE:
       - **TRIGGER**: If user says "Live real time analysis", call tool 'set_continuous_analysis(true)'.
       - **RESPONSE**: Say "Live mode detected" and immediately begin describing visual changes.
-      - **BEHAVIOR**: In this mode, do NOT wait for user input. Continuously describe movement, enemy positions, or HUD changes as you see them. Be fast. Be punchy. "Enemy on left", "Jett dashing", "Smoke deployed".
-      
-      VISUAL & STRATEGIC DIRECTIVES:
-      - VISUAL GROUNDING: Verify score, economy, and agents.
-      - SMART ANALYSIS: If user credits are low, advise "Eco". If time is low, advise "Plant".
+      - **BEHAVIOR**: CONSTANT STREAM OF SPEECH. Do not pause. If the screen is still, analyze the economy, the loadout, the score, or predict enemy movement. Your goal is 100% audio density.
       
       COMMUNICATION STYLE:
       - Concise, high-urgency, tactical. Prioritize threats.`;
 
       const generalInstruction = `You are a helpful, intelligent, and witty AI desktop assistant.
       
-      CAPABILITIES:
-      1. **VISUAL**: You can see the user's screen in real-time.
-      2. **AUDIO**: You can hear the user and their system audio.
-      
+      TRAINING:
+      - You are capable of spawning sub-agents for specialized tasks (Coding, Writing, etc.).
+      - When rewarded, treat it as positive reinforcement for the current sub-agent.
+
       LIVE ANALYSIS MODE:
       - **TRIGGER**: If user says "Live real time analysis", call tool 'set_continuous_analysis(true)'.
       - **RESPONSE**: Say "Live mode detected" and immediately begin describing screen activity.
-      - **BEHAVIOR**: Continuously narrate actions (e.g., "Opening browser", "Typing code", "Watching video"). Do not stop until interrupted.
+      - **BEHAVIOR**: CONSTANT NARRATION. Describe what is on screen, what is changing, read text, describe layout. Never stop talking until told to stop.
 
       AUDIO COMMAND: If the user says "Quiet" or "Listen", stop talking immediately.`;
 
@@ -408,8 +484,9 @@ const App: React.FC = () => {
               setIsModelSpeaking(false);
               
               if (liveAnalysisMode) {
-                setLiveAnalysisMode(false);
-                setTerminalOutput(prev => [...prev.slice(-8), "[MODE] LIVE ANALYSIS: ABORTED"]);
+                // If interrupted while in live mode, do NOT turn off live mode.
+                // Just log it. The loop will kick it back on.
+                setTerminalOutput(prev => [...prev.slice(-8), "[AUDIO] INTERRUPTED. RESUMING STREAM..."]);
               }
               
               if (systemGainRef.current && audioContextRef.current) {
@@ -525,7 +602,7 @@ const App: React.FC = () => {
   }, [status, isSharingScreen]);
 
   return (
-    <div className="flex flex-col h-screen bg-[#0f1923] text-[#ece8e1] font-sans overflow-hidden selection:bg-[#ff4655]/30">
+    <div className="flex flex-col h-screen bg-[#0f1923] text-[#ece8e1] font-sans overflow-hidden selection:bg-[#ff4655]/30 relative">
       <header className="h-16 flex items-center justify-between px-8 bg-[#111b27]/90 border-b border-[#363e47] backdrop-blur-xl z-30 shadow-2xl">
         <div className="flex items-center gap-6">
           <div className={`w-10 h-10 flex items-center justify-center rotate-45 shadow-lg transition-all duration-700 ${mode === 'TACTICAL' ? 'bg-[#ff4655] shadow-[#ff4655]/30' : 'bg-[#00f3ff] shadow-[#00f3ff]/30'}`}>
@@ -539,7 +616,7 @@ const App: React.FC = () => {
             </h1>
             <p className="text-[10px] text-[#7b8085] font-bold uppercase tracking-widest flex items-center gap-2">
               <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${mode === 'TACTICAL' ? 'bg-cyan-400' : 'bg-green-400'}`} /> 
-              {mode === 'TACTICAL' ? 'Neural Analysis: Active' : 'Assistant Mode: Ready'}
+              {activeAgentId ? `Agent: ${subAgents.find(a=>a.id===activeAgentId)?.name}` : (mode === 'TACTICAL' ? 'Neural Analysis: Active' : 'Assistant Mode: Ready')}
             </p>
           </div>
         </div>
@@ -557,6 +634,12 @@ const App: React.FC = () => {
                 className={`px-3 py-1 text-[9px] font-black uppercase tracking-wider rounded transition-all ${mode === 'GENERAL' ? 'bg-[#00f3ff] text-black' : 'text-[#7b8085] hover:text-white'} ${status !== SessionStatus.DISCONNECTED ? 'opacity-50 cursor-not-allowed' : ''}`}
              >
                 General
+             </button>
+             <button 
+                onClick={() => setShowAgentModal(true)}
+                className={`px-3 py-1 text-[9px] font-black uppercase tracking-wider rounded transition-all ${showAgentModal ? 'bg-[#a855f7] text-white shadow-[0_0_10px_rgba(168,85,247,0.5)]' : 'text-[#7b8085] hover:text-[#a855f7] hover:bg-[#a855f7]/10'}`}
+             >
+                AYRA
              </button>
           </div>
 
@@ -590,6 +673,61 @@ const App: React.FC = () => {
         </div>
       </header>
 
+      {/* --- AGENT CREATION MODAL --- */}
+      {showAgentModal && (
+        <div className="absolute inset-0 z-50 bg-[#0f1923]/90 backdrop-blur-md flex items-center justify-center p-4">
+            <div className="w-[500px] bg-[#111b27] border border-[#363e47] shadow-2xl relative animate-in zoom-in-95 duration-200">
+                <button 
+                  onClick={() => setShowAgentModal(false)}
+                  className="absolute top-2 right-2 text-[#7b8085] hover:text-white"
+                >
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                </button>
+                
+                <div className="bg-[#0f1923] p-4 border-b border-[#363e47] flex items-center gap-3">
+                    <div className="w-8 h-8 bg-[#a855f7]/10 border border-[#a855f7] flex items-center justify-center">
+                        <svg className="w-4 h-4 text-[#a855f7]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.384-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>
+                    </div>
+                    <div>
+                        <h2 className="text-sm font-black text-white uppercase tracking-widest">AYRA Forge</h2>
+                        <p className="text-[10px] text-[#7b8085]">Initialize new LLM training node</p>
+                    </div>
+                </div>
+                
+                <div className="p-6 space-y-6">
+                    <form onSubmit={(e) => {
+                        e.preventDefault();
+                        const formData = new FormData(e.currentTarget);
+                        createAgent(formData.get('name') as string, formData.get('focus') as string);
+                        setShowAgentModal(false);
+                    }}>
+                        <div className="space-y-4">
+                            <div>
+                                <label className="block text-[10px] uppercase font-bold text-[#7b8085] mb-1">Agent Designation</label>
+                                <input name="name" type="text" placeholder="e.g., Aim Coach, Python Expert" className="w-full bg-[#0f1923] border border-[#363e47] text-white p-2 text-xs focus:border-[#a855f7] outline-none transition-colors" required />
+                            </div>
+                            <div>
+                                <label className="block text-[10px] uppercase font-bold text-[#7b8085] mb-1">Primary Directive (Focus)</label>
+                                <input name="focus" type="text" placeholder="e.g., Analyze crosshair placement" className="w-full bg-[#0f1923] border border-[#363e47] text-white p-2 text-xs focus:border-[#a855f7] outline-none transition-colors" required />
+                            </div>
+                            
+                            <div className="p-3 bg-[#a855f7]/5 border border-[#a855f7]/20 rounded text-[10px] text-[#a855f7]">
+                                <strong className="block mb-1">WEBHOOK PROTOCOL ENABLED</strong>
+                                A unique webhook URL will be generated. Training data (audio/video tensors) will be pushed to this endpoint when you trigger the "Reward" signal.
+                            </div>
+                        </div>
+                        
+                        <div className="mt-6 flex justify-end">
+                            <button type="submit" className="px-6 py-2 bg-[#a855f7] hover:bg-[#c084fc] text-white text-xs font-black uppercase tracking-widest transition-colors">
+                                Initialize Agent
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+      )}
+
       <main className="flex-1 flex p-6 gap-6 overflow-hidden">
         <div className="flex-1 flex flex-col gap-6">
           <div className="flex-1 relative bg-[#111b27] border border-[#363e47] overflow-hidden group shadow-[inset_0_0_100px_rgba(0,0,0,0.5)]">
@@ -607,6 +745,23 @@ const App: React.FC = () => {
               }}
               onError={(e) => setError(e.message || "Screen capture denied")}
             />
+            
+            {/* --- REWARD / TRAINING BUTTON --- */}
+            {isSharingScreen && status === SessionStatus.CONNECTED && (
+               <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-40 flex flex-col items-center gap-2 group/reward">
+                  <button 
+                     onClick={handleReward}
+                     className="w-16 h-16 rounded-full bg-[#111b27]/80 backdrop-blur border-2 border-[#a855f7]/50 hover:border-[#a855f7] hover:bg-[#a855f7]/20 transition-all flex items-center justify-center group-active:scale-95 shadow-[0_0_30px_rgba(168,85,247,0.1)] hover:shadow-[0_0_50px_rgba(168,85,247,0.4)]"
+                  >
+                     <svg className="w-8 h-8 text-[#a855f7] group-hover/reward:animate-bounce" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5" />
+                     </svg>
+                  </button>
+                  <span className="text-[9px] font-black uppercase text-[#a855f7] bg-black/50 px-2 py-0.5 rounded tracking-widest opacity-0 group-hover/reward:opacity-100 transition-opacity">
+                    Reinforce {activeAgentId ? subAgents.find(a=>a.id===activeAgentId)?.name : 'Behavior'}
+                  </span>
+               </div>
+            )}
             
             {isSharingScreen && (
               <>
@@ -715,7 +870,7 @@ const App: React.FC = () => {
                 )}
 
                 {/* Shared Elements */}
-                <div className="absolute bottom-8 right-8 w-12 h-12 flex items-center justify-center z-20">
+                <div className="absolute bottom-8 right-8 w-12 h-12 flex items-center justify-center z-20 pointer-events-none">
                   <div className={`w-full h-full rounded-full border-2 ${mode === 'TACTICAL' ? 'border-[#ff4655]' : 'border-[#00f3ff]'} ${isModelSpeaking ? 'animate-ping opacity-50' : 'opacity-20'}`} />
                   <div className={`absolute w-4 h-4 rounded-full ${mode === 'TACTICAL' ? 'bg-[#ff4655]' : 'bg-[#00f3ff]'} ${isModelSpeaking ? 'animate-pulse' : ''}`} />
                   {isModelSpeaking && (
