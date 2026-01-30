@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality, Type } from '@google/genai';
 import { SessionStatus, TranscriptionEntry } from './types';
-import { decodeAudio, decodeAudioData, createPcmBlob } from './utils/audioUtils';
+import { decodeAudio, decodeAudioData, createPcmBlob, downsampleTo16k } from './utils/audioUtils';
 import ScreenStream, { ScreenStreamHandle } from './components/ScreenStream';
 import TranscriptionView from './components/TranscriptionView';
 
@@ -18,6 +18,7 @@ const App: React.FC = () => {
   const [isSharingScreen, setIsSharingScreen] = useState(false);
   const [isMicEnabled, setIsMicEnabled] = useState(false);
   const [isModelSpeaking, setIsModelSpeaking] = useState(false);
+  const [micVolume, setMicVolume] = useState(0); // For visual feedback
   const [transcriptions, setTranscriptions] = useState<TranscriptionEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [searchSources, setSearchSources] = useState<SearchSource[]>([]);
@@ -72,20 +73,17 @@ const App: React.FC = () => {
   }, []);
 
   // --- LIVE ANALYSIS LOOP ---
-  // If Live Mode is active and the model stops speaking, we nudge it to keep describing the screen.
   useEffect(() => {
     let nudgeInterval: number;
     
     if (liveAnalysisMode && status === SessionStatus.CONNECTED) {
        nudgeInterval = window.setInterval(() => {
-          // Only send a nudge if the model isn't currently talking
           if (!isModelSpeaking && activeSessionRef.current) {
-             // We send a text message (hidden from UI usually) to force the model to look at the latest frame and speak
              activeSessionRef.current.sendRealtimeInput({
                 content: [{ text: "Analyze current frame for movement or changes." }] 
              });
           }
-       }, 2500); // Check every 2.5 seconds
+       }, 2500); 
     }
 
     return () => clearInterval(nudgeInterval);
@@ -96,18 +94,15 @@ const App: React.FC = () => {
   const connectScreenAudio = (stream: MediaStream) => {
     screenStreamRef.current = stream;
     
-    // Only connect if we have an active audio context (session running)
     if (audioContextRef.current?.input && mixerRef.current && systemGainRef.current) {
       const audioTracks = stream.getAudioTracks();
       if (audioTracks.length > 0) {
         try {
-          // Disconnect old source if exists
           if (screenAudioSourceRef.current) {
             screenAudioSourceRef.current.disconnect();
           }
           
           const source = audioContextRef.current.input.createMediaStreamSource(stream);
-          // Connect Source -> System Gain -> Main Mixer
           source.connect(systemGainRef.current);
           screenAudioSourceRef.current = source;
           
@@ -159,6 +154,7 @@ const App: React.FC = () => {
     setHasSystemAudio(false);
     setLiveAnalysisMode(false);
     setMusicState(prev => ({ ...prev, isVisible: false }));
+    setMicVolume(0);
   }, []);
 
   const handleAgentAction = useCallback(async (name: string, args: any) => {
@@ -207,7 +203,6 @@ const App: React.FC = () => {
              title: args.title,
              isVisible: true
          });
-         // Auto-hide after 10 seconds
          setTimeout(() => setMusicState(prev => ({ ...prev, isVisible: false })), 10000);
          setTerminalOutput(prev => [...prev.slice(-8), `[AUDIO] MUSIC ID: ${args.title}`]);
          return "Song identified and displayed on HUD.";
@@ -227,12 +222,17 @@ const App: React.FC = () => {
       setError(null);
 
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      
+      // Initialize Audio Contexts
+      // We try to request 16000 sample rate, but the browser might ignore it.
       const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       audioContextRef.current = { input: inputCtx, output: outputCtx };
 
       if (inputCtx.state === 'suspended') await inputCtx.resume();
       if (outputCtx.state === 'suspended') await outputCtx.resume();
+      
+      console.log(`Audio Input Rate: ${inputCtx.sampleRate}Hz`); // Debug log
 
       const mixer = inputCtx.createGain();
       mixerRef.current = mixer;
@@ -246,7 +246,8 @@ const App: React.FC = () => {
         audio: {
             echoCancellation: true,
             noiseSuppression: true,
-            autoGainControl: true
+            autoGainControl: true,
+            sampleRate: 16000 // Hint to browser
         } 
       });
       setIsMicEnabled(true);
@@ -257,8 +258,7 @@ const App: React.FC = () => {
         connectScreenAudio(screenStreamRef.current);
       }
 
-      // --- CONFIGURATION BASED ON MODE ---
-      
+      // --- CONFIGURATION ---
       const commonTools = [
         {
           name: 'identify_song',
@@ -376,8 +376,23 @@ const App: React.FC = () => {
             const silentGain = inputCtx.createGain();
             silentGain.gain.value = 0; 
             
+            const currentInputRate = inputCtx.sampleRate;
+
             scriptProcessor.onaudioprocess = (e) => {
-              const pcmBlob = createPcmBlob(e.inputBuffer.getChannelData(0));
+              const inputData = e.inputBuffer.getChannelData(0);
+              
+              // Calculate volume for UI feedback
+              let sum = 0;
+              for (let i = 0; i < inputData.length; i++) {
+                sum += inputData[i] * inputData[i];
+              }
+              const rms = Math.sqrt(sum / inputData.length);
+              setMicVolume(prev => prev * 0.8 + rms * 20); // Smooth volume updates
+
+              // Downsample to 16000Hz if necessary
+              const processedData = downsampleTo16k(inputData, currentInputRate);
+              const pcmBlob = createPcmBlob(processedData);
+              
               sessionPromise.then(s => { if (s) s.sendRealtimeInput({ media: pcmBlob }); });
             };
             
@@ -392,7 +407,6 @@ const App: React.FC = () => {
               nextStartTimeRef.current = 0;
               setIsModelSpeaking(false);
               
-              // CRITICAL: If interrupted by user voice, STOP the live analysis loop
               if (liveAnalysisMode) {
                 setLiveAnalysisMode(false);
                 setTerminalOutput(prev => [...prev.slice(-8), "[MODE] LIVE ANALYSIS: ABORTED"]);
@@ -548,10 +562,15 @@ const App: React.FC = () => {
 
           <div className="flex flex-col items-end w-32">
              <div className="flex justify-between w-full mb-1">
-                <span className="text-[8px] font-black text-[#7b8085] uppercase tracking-tighter">Latency</span>
-                <span className="text-[8px] font-black text-[#00f3ff] uppercase tracking-tighter">24ms</span>
+                <span className="text-[8px] font-black text-[#7b8085] uppercase tracking-tighter">Mic Input</span>
+                {/* Visual Mic Indicator */}
+                <div className="flex gap-0.5">
+                   {[1,2,3,4,5].map(i => (
+                     <div key={i} className={`w-1.5 h-1.5 rounded-full transition-colors duration-75 ${micVolume > i * 0.2 ? 'bg-[#00f3ff]' : 'bg-[#363e47]'}`} />
+                   ))}
+                </div>
              </div>
-             <div className="w-full h-1 bg-[#363e47] rounded-full overflow-hidden">
+             <div className="w-full h-1 bg-[#363e47] rounded-full overflow-hidden mt-1">
                 <div className="h-full bg-green-500 w-3/4" />
              </div>
           </div>
