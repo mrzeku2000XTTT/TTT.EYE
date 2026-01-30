@@ -1,11 +1,24 @@
-<div align="center">
 
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+# Radiant Tactical Core | Valorant AI Agent
 
-  <h1>Built with AI Studio</h2>
+A multimodal AI agent powered by **Gemini 2.5 Flash Native Audio**. It acts as a real-time tactical assistant for Valorant by "seeing" your gameplay and communicating via low-latency voice.
 
-  <p>The fastest path from prompt to production with Gemini.</p>
+## Features
 
-  <a href="https://aistudio.google.com/apps">Start building</a>
+- **Visual Intercept**: Captures your screen (1280x720) and streams frames to Gemini.
+- **Tactical Analysis**: Detects match score, agent played, and enemy sightings on the minimap.
+- **Voice Loop**: Proactive voice communication—the agent speaks when it sees something relevant (no wake word needed).
+- **Tactical HUD**: A React-based overlay that visualizes the AI's current assessment of the game state.
 
-</div>
+## Getting Started
+
+1. Clone this repository.
+2. Create a `.env` file in the root directory:
+   ```bash
+   API_KEY=your_google_genai_api_key
+   ```
+3. Open `index.html` in a modern browser or serve with a local server (e.g., Vite/Live Server).
+
+## Privacy
+
+The API Key is accessed via `process.env.API_KEY`. Ensure this is never committed to GitHub.

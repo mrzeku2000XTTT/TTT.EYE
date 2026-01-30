@@ -1,0 +1,16 @@
+
+# Environment variables (Keep your keys safe!)
+.env
+.env.local
+
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+
+# System files
+.DS_Store
+Thumbs.db
+.cache
