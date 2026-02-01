@@ -16,6 +16,7 @@ interface SubAgent {
   focus: string;
   webhookUrl: string;
   trainingSamples: number;
+  memories: string[]; // Persistent patterns for this specific agent
 }
 
 type AppMode = 'TACTICAL' | 'GENERAL';
@@ -34,6 +35,7 @@ const App: React.FC = () => {
   
   // Continuous Analysis Mode State
   const [liveAnalysisMode, setLiveAnalysisMode] = useState(false);
+  const [isReplaying, setIsReplaying] = useState(false); // UI State for replay mode
 
   // Agent Training State
   const [showAgentModal, setShowAgentModal] = useState(false);
@@ -49,9 +51,10 @@ const App: React.FC = () => {
 
   // Tactical & Learning UI States
   const [cursorPos, setCursorPos] = useState({ x: 50, y: 50 });
-  const [terminalOutput, setTerminalOutput] = useState<string[]>(["[System] Radiant Core v9.7", "[Neural] Webhook Interface: READY"]);
+  const [terminalOutput, setTerminalOutput] = useState<string[]>(["[System] Radiant Core v9.8", "[Neural] Persistence Layer: ONLINE"]);
   const [learningScore, setLearningScore] = useState(15); 
-  const [tacticalPatterns, setTacticalPatterns] = useState<string[]>([]); // Persistent Memory
+  
+  // HUD Data
   const [tacticalData, setTacticalData] = useState({ 
     economy: 'Detecting...', 
     callout: 'Scanning...',
@@ -61,7 +64,7 @@ const App: React.FC = () => {
     analysis: 'AWAITING DATA...' 
   });
   
-  // Ref for accessing latest state in callbacks without closure issues
+  // Refs
   const tacticalDataRef = useRef(tacticalData);
   useEffect(() => { tacticalDataRef.current = tacticalData; }, [tacticalData]);
 
@@ -72,6 +75,10 @@ const App: React.FC = () => {
   const frameIntervalRef = useRef<number | null>(null);
   const activeSessionRef = useRef<any>(null);
 
+  // Replay Buffer
+  const frameBufferRef = useRef<string[]>([]); // Stores last N base64 frames
+  const MAX_BUFFER_SIZE = 100; // ~50-70 seconds depending on capture rate
+
   // Audio Mixing Refs
   const mixerRef = useRef<GainNode | null>(null);
   const systemGainRef = useRef<GainNode | null>(null);
@@ -81,16 +88,48 @@ const App: React.FC = () => {
   const currentInRef = useRef('');
   const currentOutRef = useRef('');
 
+  // --- PERSISTENCE ---
+  // Load agents on mount
+  useEffect(() => {
+    try {
+      const savedAgents = localStorage.getItem('radiant_agents');
+      if (savedAgents) {
+        const parsed = JSON.parse(savedAgents);
+        setSubAgents(parsed);
+        const lastActive = localStorage.getItem('radiant_active_agent');
+        if (lastActive && parsed.find((a: SubAgent) => a.id === lastActive)) {
+          setActiveAgentId(lastActive);
+          setTerminalOutput(prev => [...prev, `[RESTORE] Active Agent: ${parsed.find((a: SubAgent) => a.id === lastActive)?.name}`]);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to load agents", e);
+    }
+  }, []);
+
+  // Save agents on change
+  useEffect(() => {
+    if (subAgents.length > 0) {
+      localStorage.setItem('radiant_agents', JSON.stringify(subAgents));
+    }
+  }, [subAgents]);
+
+  // Save active agent ID
+  useEffect(() => {
+    if (activeAgentId) {
+      localStorage.setItem('radiant_active_agent', activeAgentId);
+    }
+  }, [activeAgentId]);
+
   useEffect(() => {
     console.log("Radiant Tactical Core: Initialized");
   }, []);
 
-  // --- LIVE ANALYSIS LOOP (CONTINUOUS AUDIO) ---
+  // --- LIVE ANALYSIS LOOP ---
   useEffect(() => {
     let nudgeInterval: number;
     
-    if (liveAnalysisMode && status === SessionStatus.CONNECTED) {
-       // Check very frequently (100ms) if the model has stopped speaking to minimize gaps
+    if (liveAnalysisMode && status === SessionStatus.CONNECTED && !isReplaying) {
        nudgeInterval = window.setInterval(() => {
           if (!isModelSpeaking && activeSessionRef.current) {
              console.log("Nudging model for continuous audio...");
@@ -102,7 +141,7 @@ const App: React.FC = () => {
     }
 
     return () => clearInterval(nudgeInterval);
-  }, [liveAnalysisMode, status, isModelSpeaking]);
+  }, [liveAnalysisMode, status, isModelSpeaking, isReplaying]);
 
 
   // Handle incoming screen stream audio
@@ -161,6 +200,7 @@ const App: React.FC = () => {
     
     audioSourcesRef.current.forEach(s => { try { s.stop(); } catch(e) {} });
     audioSourcesRef.current.clear();
+    frameBufferRef.current = []; // Clear buffer on stop
     
     setStatus(SessionStatus.DISCONNECTED);
     setIsMicEnabled(false);
@@ -168,6 +208,7 @@ const App: React.FC = () => {
     setIsModelSpeaking(false);
     setHasSystemAudio(false);
     setLiveAnalysisMode(false);
+    setIsReplaying(false);
     setMusicState(prev => ({ ...prev, isVisible: false }));
     setMicVolume(0);
   }, []);
@@ -176,27 +217,21 @@ const App: React.FC = () => {
   const handleReward = () => {
     if (status !== SessionStatus.CONNECTED) return;
 
-    // 1. Visual Feedback
     setLearningScore(prev => Math.min(prev + 10, 100));
     
-    // 2. Identify active agent
     const currentAgent = subAgents.find(a => a.id === activeAgentId);
     const agentName = currentAgent ? currentAgent.name : "CORE_MODEL";
     
-    // 3. Log to Terminal
     setTerminalOutput(prev => [...prev.slice(-8), `[TRAINING] REWARD SIGNAL >>> ${agentName}`]);
     
-    // 4. Update Agent Stats
     if (currentAgent) {
         setSubAgents(prev => prev.map(a => a.id === activeAgentId ? { ...a, trainingSamples: a.trainingSamples + 1 } : a));
-        // Simulate Webhook Push
         console.log(`Sending training tensor to ${currentAgent.webhookUrl}`, {
             transcription: transcriptions.slice(-2),
             tacticalData: tacticalDataRef.current
         });
     }
 
-    // 5. Notify AI
     if (activeSessionRef.current) {
         activeSessionRef.current.sendRealtimeInput({
             content: [{ text: `[SYSTEM] POSITIVE REINFORCEMENT RECEIVED. Current behavior tagged as valid training data for agent: ${agentName}.` }]
@@ -212,12 +247,48 @@ const App: React.FC = () => {
         name,
         focus,
         webhookUrl: webhook,
-        trainingSamples: 0
+        trainingSamples: 0,
+        memories: []
     };
     setSubAgents(prev => [...prev, newAgent]);
     setActiveAgentId(newId);
     setTerminalOutput(prev => [...prev.slice(-8), `[FORGE] CREATED AGENT: ${name}`]);
     return webhook;
+  };
+
+  const performReplay = async () => {
+    if (!activeSessionRef.current || frameBufferRef.current.length === 0) return "No buffer to replay.";
+    
+    setIsReplaying(true);
+    setTerminalOutput(prev => [...prev.slice(-8), `[REPLAY] STREAMING BUFFERED FRAMES...`]);
+
+    // Send a message context first
+    await activeSessionRef.current.sendRealtimeInput({
+        content: [{ text: "SYSTEM: Beginning high-speed replay of the last 30 seconds. TRACK THE TARGET." }]
+    });
+
+    // Fast-stream the buffer
+    const frames = [...frameBufferRef.current];
+    // Decimate frames if too many (send every 2nd frame if buffer is huge to save bandwidth/time)
+    const step = frames.length > 50 ? 2 : 1;
+
+    for (let i = 0; i < frames.length; i += step) {
+        const base64 = frames[i];
+        if (base64) {
+            await activeSessionRef.current.sendRealtimeInput({ 
+                media: { data: base64, mimeType: 'image/jpeg' } 
+            });
+            // Small delay to allow model to ingest frame sequence
+            await new Promise(r => setTimeout(r, 50)); 
+        }
+    }
+
+    await activeSessionRef.current.sendRealtimeInput({
+        content: [{ text: "SYSTEM: Replay complete. Report object position." }]
+    });
+
+    setIsReplaying(false);
+    return "Replay sequence transmitted.";
   };
 
   const handleAgentAction = useCallback(async (name: string, args: any) => {
@@ -251,18 +322,29 @@ const App: React.FC = () => {
 
       case 'log_tactical_pattern':
          const newPattern = args.pattern;
-         setTacticalPatterns(prev => {
-             const updated = [...prev, newPattern];
-             return updated.length > 5 ? updated.slice(updated.length - 5) : updated;
-         });
-         setLearningScore(prev => Math.min(prev + 15, 100));
-         setTerminalOutput(prev => [...prev.slice(-8), `[MEMORY] LEARNED: ${newPattern}`]);
-         return "Pattern saved to long-term memory.";
+         // Find active agent to save memory to
+         setSubAgents(prev => {
+            const activeId = activeAgentId || (prev.length > 0 ? prev[0].id : null);
+            if (!activeId) return prev; // No agent to save to
 
-      case 'neural_adaptation_sync':
-         setLearningScore(prev => Math.min(prev + (args.learningBoost || 5), 100));
-         setTerminalOutput(prev => [...prev.slice(-8), `[Adaptation] Logic refined via gameplay data.`]);
-         return "ML Update Logged.";
+            return prev.map(agent => {
+                if (agent.id === activeId) {
+                    const updatedMemories = [...agent.memories, newPattern];
+                    // Keep last 10 memories
+                    if (updatedMemories.length > 10) updatedMemories.shift();
+                    return { ...agent, memories: updatedMemories };
+                }
+                return agent;
+            });
+         });
+         
+         setLearningScore(prev => Math.min(prev + 15, 100));
+         setTerminalOutput(prev => [...prev.slice(-8), `[MEMORY] LOGGED: ${newPattern}`]);
+         return "Pattern saved to agent long-term memory.";
+
+      case 'analyze_replay':
+         const replayResult = await performReplay();
+         return replayResult;
 
       case 'identify_song':
          setMusicState({
@@ -281,7 +363,7 @@ const App: React.FC = () => {
       default:
         return "Action completed.";
     }
-  }, []);
+  }, [activeAgentId]); // Depend on activeAgentId for logging
 
   const startSession = async () => {
     try {
@@ -357,6 +439,16 @@ const App: React.FC = () => {
             },
             required: ['active']
           }
+        },
+        {
+          name: 'analyze_replay',
+          parameters: {
+            type: Type.OBJECT,
+            description: 'Call this when you need to see a replay of the last 30 seconds to track fast moving objects (like a shell game, ball shuffle, or fast peek).',
+            properties: {
+               reason: { type: Type.STRING, description: "Reason for replay" }
+            }
+          }
         }
       ];
 
@@ -381,18 +473,11 @@ const App: React.FC = () => {
           name: 'log_tactical_pattern',
           parameters: {
             type: Type.OBJECT,
-            description: 'Call this when you notice a recurring enemy habit or strategy to "remember" it.',
+            description: 'Call this when you notice a recurring enemy habit or strategy to "remember" it for the current Agent.',
             properties: { 
                 pattern: { type: Type.STRING, description: "The recurring behavior observed (e.g., 'Enemy Jett always peeks Mid early')" } 
             },
             required: ['pattern']
-          }
-        },
-        {
-          name: 'neural_adaptation_sync',
-          parameters: {
-            type: Type.OBJECT,
-            properties: { learningBoost: { type: Type.NUMBER } }
           }
         }
       ];
@@ -409,7 +494,13 @@ const App: React.FC = () => {
         }
       ];
 
-      const tacticalInstruction = `You are the Radiant Tactical Voice, an elite Valorant coach.
+      const currentAgent = activeAgentId ? subAgents.find(a => a.id === activeAgentId) : null;
+      const memories = currentAgent ? currentAgent.memories : [];
+      const memoryContext = memories.length > 0 ? `\n\n[PERSISTENT MEMORY FOR AGENT ${currentAgent?.name}]:\n${memories.map(m => `- ${m}`).join('\n')}` : "";
+
+      const tacticalInstruction = `You are the Radiant Tactical Voice.
+      
+      ${memoryContext}
           
       CORE AUDIO DIRECTIVES:
       1. **LISTEN INTENTLY**: You are receiving a MIX of user voice and SYSTEM AUDIO (game sounds).
@@ -421,8 +512,9 @@ const App: React.FC = () => {
       - If the user rewards you, acknowledge it as "Training Data Logged".
       - You can create agents via tool 'create_learning_agent' if the user asks.
 
-      LIVE ANALYSIS MODE:
+      LIVE ANALYSIS MODE & REPLAY:
       - **TRIGGER**: If user says "Live real time analysis", call tool 'set_continuous_analysis(true)'.
+      - **SHELL GAMES / TRACKING**: If the user asks you to track a ball, shuffle, or fast movement and you missed it, OR if they ask "Who has the ball?", call tool 'analyze_replay({})' to review the last 30 seconds of video buffer.
       - **RESPONSE**: Say "Live mode detected" and immediately begin describing visual changes.
       - **BEHAVIOR**: CONSTANT STREAM OF SPEECH. Do not pause. If the screen is still, analyze the economy, the loadout, the score, or predict enemy movement. Your goal is 100% audio density.
       
@@ -431,12 +523,15 @@ const App: React.FC = () => {
 
       const generalInstruction = `You are a helpful, intelligent, and witty AI desktop assistant.
       
+      ${memoryContext}
+
       TRAINING:
       - You are capable of spawning sub-agents for specialized tasks (Coding, Writing, etc.).
       - When rewarded, treat it as positive reinforcement for the current sub-agent.
 
       LIVE ANALYSIS MODE:
       - **TRIGGER**: If user says "Live real time analysis", call tool 'set_continuous_analysis(true)'.
+      - **REPLAY**: If you need to see what just happened (e.g. "Did you see that?", "Where did the ball go?"), call 'analyze_replay'.
       - **RESPONSE**: Say "Live mode detected" and immediately begin describing screen activity.
       - **BEHAVIOR**: CONSTANT NARRATION. Describe what is on screen, what is changing, read text, describe layout. Never stop talking until told to stop.
 
@@ -590,7 +685,17 @@ const App: React.FC = () => {
               const reader = new FileReader();
               reader.onloadend = () => {
                 const base64 = (reader.result as string).split(',')[1];
-                activeSessionRef.current.sendRealtimeInput({ media: { data: base64, mimeType: 'image/jpeg' } });
+                
+                // 1. Store in Buffer (Circular)
+                frameBufferRef.current.push(base64);
+                if (frameBufferRef.current.length > MAX_BUFFER_SIZE) {
+                    frameBufferRef.current.shift();
+                }
+
+                // 2. Send Realtime (unless replaying)
+                if (!isReplaying) {
+                   activeSessionRef.current.sendRealtimeInput({ media: { data: base64, mimeType: 'image/jpeg' } });
+                }
               };
               reader.readAsDataURL(blob);
             }
@@ -599,7 +704,7 @@ const App: React.FC = () => {
       }, 700); 
     }
     return () => { if (frameIntervalRef.current) window.clearInterval(frameIntervalRef.current); };
-  }, [status, isSharingScreen]);
+  }, [status, isSharingScreen, isReplaying]);
 
   return (
     <div className="flex flex-col h-screen bg-[#0f1923] text-[#ece8e1] font-sans overflow-hidden selection:bg-[#ff4655]/30 relative">
@@ -769,9 +874,9 @@ const App: React.FC = () => {
                  {liveAnalysisMode && (
                    <div className="absolute top-8 left-1/2 -translate-x-1/2 z-40 flex flex-col items-center gap-1 animate-in slide-in-from-top duration-500">
                       <div className="px-4 py-1 bg-red-600/90 text-white text-[10px] font-black uppercase tracking-[0.3em] border border-red-400 shadow-[0_0_20px_rgba(220,38,38,0.5)] animate-pulse rounded-sm">
-                         Live Analysis
+                         {isReplaying ? 'REPLAY ANALYSIS' : 'LIVE ANALYSIS'}
                       </div>
-                      <div className="w-full h-0.5 bg-red-500 animate-scanner-line"></div>
+                      <div className={`w-full h-0.5 ${isReplaying ? 'bg-yellow-400' : 'bg-red-500'} animate-scanner-line`}></div>
                    </div>
                  )}
 
@@ -842,14 +947,16 @@ const App: React.FC = () => {
                     <div className="absolute bottom-8 left-8 w-[28rem] h-56 bg-[#0f1923]/95 backdrop-blur-lg border border-[#363e47] p-5 font-mono text-[10px] z-20 overflow-hidden shadow-2xl flex flex-col">
                        <div className="border-b border-[#363e47] pb-2 mb-3 flex items-center justify-between">
                           <span className="text-[9px] uppercase font-black text-[#ff4655] tracking-widest">Neural_Memory_Core</span>
-                          <span className="text-[#00f3ff] animate-pulse">● LEARNING</span>
+                          <span className="text-[#00f3ff] animate-pulse">
+                              {activeAgentId ? `[AGENT: ${subAgents.find(a=>a.id===activeAgentId)?.name}]` : 'CORE SYSTEM'}
+                          </span>
                        </div>
                        
                        <div className="flex-1 space-y-2 overflow-y-auto mb-2 custom-scrollbar">
-                          {tacticalPatterns.length === 0 ? (
-                              <div className="text-[#7b8085] italic">Analyzing enemy patterns...</div>
+                          {(!activeAgentId || !subAgents.find(a=>a.id===activeAgentId)?.memories.length) ? (
+                              <div className="text-[#7b8085] italic">No persistent patterns for current agent...</div>
                           ) : (
-                              tacticalPatterns.map((pat, idx) => (
+                              subAgents.find(a=>a.id===activeAgentId)?.memories.map((pat, idx) => (
                                   <div key={idx} className="flex gap-2 items-start text-[#ece8e1] animate-in slide-in-from-left">
                                       <span className="text-[#00f3ff] font-bold">[{idx + 1}]</span>
                                       <span className="leading-tight">{pat}</span>
