@@ -1,5 +1,7 @@
 
-# Radiant Tactical Core | Valorant AI Agent
+# Radiant Tactical Core | Valorant AI Agent/ GENERAL AGENT ASSISTANT
+
+GO to https://ttt-cth9dixd5-mrzeku12-9105s-projects.vercel.app to test.
 
 A multimodal AI agent powered by **Gemini 2.5 Flash Native Audio**. It acts as a real-time tactical assistant for Valorant by "seeing" your gameplay and communicating via low-latency voice.
 
